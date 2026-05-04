@@ -1,33 +1,168 @@
-import { NativeModules } from 'react-native';
+/**
+ * VoiceModule - 基于 Sherpa-ONNX 的离线 ASR + TTS 模块
+ * 
+ * 功能：
+ * - ASR: 语音识别（中文 SenseVoice 模型）
+ * - TTS: 语音合成（中文 VITS 模型）
+ * - 完全离线，无需网络
+ * - 不依赖 GMS，适合国内安卓设备
+ */
 
-export interface VoiceModuleType {
-  /**
-   * Initialize TTS model from path or asset
-   * @param modelPath - File path or "asset:models/xxx.onnx"
-   */
-  initTTS(modelPath: string): Promise<boolean>;
+import { createSTT, createTTS } from 'react-native-sherpa-onnx';
+import type { SttEngine, TtsEngine, SttRecognitionResult, GeneratedAudio } from 'react-native-sherpa-onnx';
+import { Audio } from 'expo-av';
 
-  /**
-   * Initialize ASR model from path or asset
-   * @param modelPath - File path or "asset:models/xxx.onnx"
-   */
-  initASR(modelPath: string): Promise<boolean>;
+// 模型路径（打包在 assets 中）
+const ASR_MODEL_PATH = 'models/sense-voice-zh';
+const TTS_MODEL_PATH = 'models/vits-zh';
 
-  /**
-   * Synthesize text to audio (WAV format, base64 encoded)
-   * @param text - Text to synthesize
-   * @returns Base64 encoded WAV audio data
-   */
-  synthesize(text: string): Promise<string>;
-
-  /**
-   * Recognize speech from audio data
-   * @param audioData - Float32 array of PCM audio samples (16kHz, mono)
-   * @returns Recognized text
-   */
-  recognize(audioData: number[]): Promise<string>;
+interface VoiceModuleType {
+  /** 初始化 ASR 引擎 */
+  initASR(): Promise<boolean>;
+  
+  /** 初始化 TTS 引擎 */
+  initTTS(): Promise<boolean>;
+  
+  /** 语音识别：将音频文件转换为文本 */
+  recognizeAudioFile(filePath: string): Promise<string>;
+  
+  /** 语音识别：将 PCM 样本转换为文本 */
+  recognizeSamples(samples: number[], sampleRate?: number): Promise<string>;
+  
+  /** 语音合成：将文本转换为音频并播放 */
+  synthesizeAndPlay(text: string): Promise<void>;
+  
+  /** 停止当前播放 */
+  stopPlaying(): Promise<void>;
+  
+  /** 释放所有资源 */
+  destroy(): Promise<void>;
+  
+  /** 检查是否已初始化 */
+  isReady(): { asr: boolean; tts: boolean };
 }
 
-const { VoiceModule } = NativeModules;
+class VoiceModuleImpl implements VoiceModuleType {
+  private sttEngine: SttEngine | null = null;
+  private ttsEngine: TtsEngine | null = null;
+  private sound: Audio.Sound | null = null;
 
-export default VoiceModule as VoiceModuleType;
+  isReady(): { asr: boolean; tts: boolean } {
+    return {
+      asr: this.sttEngine !== null,
+      tts: this.ttsEngine !== null,
+    };
+  }
+
+  async initASR(): Promise<boolean> {
+    try {
+      if (this.sttEngine) {
+        return true; // 已经初始化
+      }
+
+      console.log('[VoiceModule] 初始化 ASR 引擎...');
+      
+      this.sttEngine = await createSTT({
+        modelPath: { type: 'asset', path: ASR_MODEL_PATH },
+        modelType: 'sense_voice',
+        preferInt8: true, // 使用 INT8 量化模型
+      });
+      console.log('[VoiceModule] ASR 初始化成功');
+      return true;
+    } catch (error) {
+      console.error('[VoiceModule] ASR 初始化失败:', error);
+      return false;
+    }
+  }
+
+  async initTTS(): Promise<boolean> {
+    try {
+      if (this.ttsEngine) {
+        return true; // 已经初始化
+      }
+
+      console.log('[VoiceModule] 初始化 TTS 引擎...');
+      
+      this.ttsEngine = await createTTS({
+        modelPath: { type: 'asset', path: TTS_MODEL_PATH },
+        modelType: 'vits',
+      });
+      console.log('[VoiceModule] TTS 初始化成功');
+      return true;
+    } catch (error) {
+      console.error('[VoiceModule] TTS 初始化失败:', error);
+      return false;
+    }
+  }
+
+  async recognizeAudioFile(filePath: string): Promise<string> {
+    if (!this.sttEngine) {
+      throw new Error('ASR 引擎未初始化，请先调用 initASR()');
+    }
+
+    const result: SttRecognitionResult = await this.sttEngine.transcribeFile(filePath);
+    return result.text;
+  }
+
+  async recognizeSamples(samples: number[], sampleRate: number = 16000): Promise<string> {
+    if (!this.sttEngine) {
+      throw new Error('ASR 引擎未初始化，请先调用 initASR()');
+    }
+
+    const result: SttRecognitionResult = await this.sttEngine.transcribeSamples(samples, sampleRate);
+    return result.text;
+  }
+
+  async synthesizeAndPlay(text: string): Promise<void> {
+    if (!this.ttsEngine) {
+      throw new Error('TTS 引擎未初始化，请先调用 initTTS()');
+    }
+
+    const generated: GeneratedAudio = await this.ttsEngine.generateSpeech(text);
+    
+    // 停止之前的播放
+    await this.stopPlaying();
+
+    // 使用 expo-av 播放合成的音频
+    const { sound: newSound } = await Audio.Sound.createAsync(
+      { uri: `data:audio/wav;base64,${generated.audioBase64}` },
+      { shouldPlay: true }
+    );
+    
+    this.sound = newSound;
+    
+    // 监听播放结束事件
+    newSound.setOnPlaybackStatusUpdate((status) => {
+      if (status.isLoaded && status.didJustFinish) {
+        this.sound = null;
+      }
+    });
+  }
+
+  async stopPlaying(): Promise<void> {
+    if (this.sound) {
+      await this.sound.stopAsync();
+      await this.sound.unloadAsync();
+      this.sound = null;
+    }
+  }
+
+  async destroy(): Promise<void> {
+    await this.stopPlaying();
+    
+    if (this.sttEngine) {
+      await this.sttEngine.destroy();
+      this.sttEngine = null;
+    }
+    
+    if (this.ttsEngine) {
+      await this.ttsEngine.destroy();
+      this.ttsEngine = null;
+    }
+  }
+}
+
+// 导出单例
+export const VoiceModule = new VoiceModuleImpl();
+export type { VoiceModuleType };
+export default VoiceModule;
