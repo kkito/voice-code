@@ -10,6 +10,7 @@ import {
   ActivityIndicator,
   Platform,
 } from 'react-native';
+import * as Clipboard from 'expo-clipboard';
 import { Audio } from 'expo-av';
 import { VoiceModule } from './src/VoiceModule';
 
@@ -28,6 +29,12 @@ export default function App() {
     const lines = message.split('\n').filter(l => l.trim());
     setLog((prev) => [...prev, ...lines.map(line => `[${new Date().toLocaleTimeString()}] ${line}`)]);
   }, []);
+
+  const copyLogToClipboard = useCallback(async () => {
+    const fullLog = log.join('\n');
+    await Clipboard.setStringAsync(fullLog);
+    Alert.alert('已复制', '日志已复制到剪贴板');
+  }, [log]);
 
   // 初始化 ASR 和 TTS
   const handleInit = useCallback(async () => {
@@ -73,11 +80,14 @@ export default function App() {
   // 开始录音（使用 sherpa-onnx 原生 PCM 流）
   const startRecording = useCallback(async () => {
     try {
-      addLog('开始录音（PCM 流）...');
-      await VoiceModule.startMicrophone();
+      addLog('=== 开始录音 ===');
+      addLog('调用 VoiceModule.startMicrophone()...');
+      const startLog = await VoiceModule.startMicrophone();
+      addLog(startLog);
       setIsRecording(true);
+      addLog('录音已启动，请说话...');
     } catch (error: any) {
-      addLog(`录音失败: ${error.message}`);
+      addLog(`❌ 录音失败: ${error.message}`);
       Alert.alert('录音失败', error.message);
     }
   }, [addLog]);
@@ -85,14 +95,23 @@ export default function App() {
   // 停止录音并识别
   const stopRecording = useCallback(async () => {
     try {
-      addLog('停止录音并识别...');
+      addLog('=== 停止录音并识别 ===');
       setIsRecording(false);
 
-      const text = await VoiceModule.stopMicrophoneAndRecognize();
+      addLog('调用 VoiceModule.stopMicrophoneAndRecognize()...');
+      const { text, debugLog } = await VoiceModule.stopMicrophoneAndRecognize();
+
+      // 先输出调试日志到UI
+      addLog(debugLog);
+
       setRecognizedText(text);
-      addLog(`识别结果: ${text || '(空)'}`);
+      if (text) {
+        addLog(`✅ 识别成功: ${text}`);
+      } else {
+        addLog('⚠️ 识别结果为空！请查看上方调试日志了解原因');
+      }
     } catch (error: any) {
-      addLog(`识别异常:`);
+      addLog(`❌ 识别异常:`);
       addLog(error.message || String(error));
       Alert.alert('识别失败', error.message);
     } finally {
@@ -224,10 +243,23 @@ export default function App() {
 
       {/* 日志 */}
       <View style={styles.logSection}>
-        <Text style={styles.sectionTitle}>日志（包含完整错误信息）</Text>
-        <ScrollView style={styles.logBox}>
+        <View style={styles.logHeader}>
+          <Text style={styles.sectionTitle}>日志（包含完整错误信息）</Text>
+          <TouchableOpacity
+            style={styles.copyButton}
+            onPress={copyLogToClipboard}
+            disabled={log.length === 0}
+          >
+            <Text style={styles.copyButtonText}>📋 复制日志</Text>
+          </TouchableOpacity>
+        </View>
+        <ScrollView style={styles.logBox} horizontal={false}>
           {log.map((line, index) => (
-            <Text key={index} style={styles.logText}>
+            <Text
+              key={index}
+              style={styles.logText}
+              selectable
+            >
               {line}
             </Text>
           ))}
@@ -337,6 +369,23 @@ const styles = StyleSheet.create({
     padding: 12,
     borderRadius: 8,
     marginTop: 8,
+  },
+  logHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  copyButton: {
+    backgroundColor: '#2196F3',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
+  copyButtonText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
   },
   logBox: {
     flex: 1,

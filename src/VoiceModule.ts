@@ -7,7 +7,7 @@ import { createTTS, saveAudioToFile } from 'react-native-sherpa-onnx/tts';
 import { createPcmLiveStream } from 'react-native-sherpa-onnx/audio';
 import type { SttEngine, TtsEngine } from 'react-native-sherpa-onnx';
 import { Audio } from 'expo-av';
-import { Platform, Alert } from 'react-native';
+import { Platform, Alert, PermissionsAndroid } from 'react-native';
 import { DocumentDirectoryPath } from '@dr.pogodin/react-native-fs';
 
 // 模型路径（打包在 assets 中）
@@ -24,18 +24,18 @@ export const formatError = (context: string, error: any): string => {
   let msg = `\n========== 错误: ${context} ==========\n`;
   msg += `错误类型: ${error?.constructor?.name || 'Unknown'}\n`;
   msg += `错误消息: ${error?.message || String(error)}\n`;
-  
+
   if (error?.stack) {
     msg += `\n错误堆栈:\n${error.stack}\n`;
   }
-  
+
   // 尝试获取更多信息
   try {
-    msg += `\n完整错误对象:\n${JSON.stringify(error, null, 2)}\n`;
+    msg += `\n完整错误对象:\n${JSON.stringify(error, Object.getOwnPropertyNames(error), 2)}\n`;
   } catch (e) {
     msg += `\n(无法序列化错误对象)\n`;
   }
-  
+
   msg += '========================================\n';
   return msg;
 };
@@ -45,9 +45,9 @@ interface VoiceModuleType {
   initTTS(): Promise<boolean>;
   recognizeAudioFile(filePath: string): Promise<string>;
   /** 开始麦克风录音（使用 sherpa-onnx 原生 PCM 流） */
-  startMicrophone(): Promise<void>;
-  /** 停止录音并识别（返回识别文本） */
-  stopMicrophoneAndRecognize(): Promise<string>;
+  startMicrophone(): Promise<string>;
+  /** 停止录音并识别（返回 {text, debugLog}） */
+  stopMicrophoneAndRecognize(): Promise<{ text: string; debugLog: string }>;
   synthesizeAndPlay(text: string): Promise<void>;
   stopPlaying(): Promise<void>;
   destroy(): Promise<void>;
@@ -174,58 +174,121 @@ class VoiceModuleImpl implements VoiceModuleType {
     }
   }
 
-  async startMicrophone(): Promise<void> {
+  async startMicrophone(): Promise<string> {
+    let log = '[VoiceModule] 开始录音\n';
+
     if (!this.sttEngine) {
-      throw new Error('ASR 引擎未初始化');
+      log += '[VoiceModule] 错误: ASR 引擎未初始化\n';
+      throw new Error(log);
+    }
+
+    // Android 运行时请求麦克风权限
+    if (Platform.OS === 'android') {
+      log += '[VoiceModule] 请求麦克风权限...\n';
+      try {
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+          {
+            title: '麦克风权限',
+            message: '需要使用麦克风进行语音识别',
+            buttonNeutral: '稍后询问',
+            buttonNegative: '拒绝',
+            buttonPositive: '允许',
+          }
+        );
+        log += `[VoiceModule] 权限请求结果: ${granted}\n`;
+        if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
+          log += '[VoiceModule] ⚠️ 麦克风权限被拒绝！\n';
+          throw new Error(log);
+        }
+        log += '[VoiceModule] 麦克风权限已授予 ✓\n';
+      } catch (err: any) {
+        log += `[VoiceModule] 权限请求异常: ${err?.message}\n`;
+        throw new Error(log);
+      }
     }
 
     this.micChunks = [];
+    log += '[VoiceModule] micChunks 已清空\n';
 
     this.pcmStream = createPcmLiveStream({
       sampleRate: this.micSampleRate,
     });
+    log += `[VoiceModule] createPcmLiveStream 创建成功, sampleRate: ${this.micSampleRate}\n`;
 
-    this.pcmStream.on('pcmLiveStreamData', (data: { base64: string }) => {
-      // base64 是 Int16 PCM 数据，需要转换为浮点数数组
-      const binaryString = atob(data.base64);
-      const samples: number[] = [];
-      for (let i = 0; i < binaryString.length; i += 2) {
-        const low = binaryString.charCodeAt(i);
-        const high = binaryString.charCodeAt(i + 1);
-        const int16 = (high << 8) | low;
-        // 将无符号 Int16 转换为有符号，然后归一化到 [-1.0, 1.0]
-        const signed = int16 > 32767 ? int16 - 65536 : int16;
-        samples.push(signed / 32768.0);
-      }
+    // 使用 onData 方法注册回调，库已经帮我们把 base64 PCM 转换为 Float32Array
+    let callbackCount = 0;
+    let totalSamples = 0;
+    this.pcmStream.onData((samples: Float32Array, sampleRate: number) => {
+      callbackCount++;
+      totalSamples += samples.length;
+      // samples 已经是归一化到 [-1.0, 1.0] 的 Float32Array
       this.micChunks.push(...samples);
     });
 
+    // 注册错误回调，捕获原生层错误
+    this.pcmStream.onError((message: string) => {
+      log += `[VoiceModule] ⚠️ PCM 流错误: ${message}\n`;
+      console.error(`[VoiceModule] PCM 流错误: ${message}`);
+    });
+
+    log += '[VoiceModule] onData 回调已注册\n';
+    log += '[VoiceModule] 调用 pcmStream.start()...\n';
+
     this.pcmStream.start();
+    log += '[VoiceModule] 录音已开始！等待 onData 回调...\n';
+
+    // 给原生层一点时间启动流
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    return log;
   }
 
-  async stopMicrophoneAndRecognize(): Promise<string> {
+  async stopMicrophoneAndRecognize(): Promise<{ text: string; debugLog: string }> {
+    let log = '[VoiceModule] 停止录音并识别\n';
+
     if (!this.pcmStream) {
-      throw new Error('麦克风未启动，请先调用 startMicrophone()');
+      log += '[VoiceModule] 错误: 麦克风未启动\n';
+      throw new Error(log);
     }
 
+    log += '[VoiceModule] 调用 pcmStream.stop()...\n';
     this.pcmStream.stop();
+    log += '[VoiceModule] pcmStream 已停止\n';
+
     this.pcmStream = null;
 
     if (!this.sttEngine) {
-      throw new Error('ASR 引擎未初始化');
+      log += '[VoiceModule] 错误: ASR 引擎未初始化\n';
+      throw new Error(log);
     }
 
+    log += `[VoiceModule] 录音数据: micChunks 长度 = ${this.micChunks.length}\n`;
+    log += `[VoiceModule] 录音时长约 ${(this.micChunks.length / this.micSampleRate).toFixed(1)} 秒\n`;
+
     if (this.micChunks.length === 0) {
-      return '';
+      log += '[VoiceModule] ⚠️ 警告: 没有录音数据！可能原因：\n';
+      log += '  1. 麦克风权限未授予\n';
+      log += '  2. onData 回调没有被触发\n';
+      log += '  3. 录音时间太短\n';
+      return { text: '', debugLog: log };
     }
+
+    log += `[VoiceModule] 调用 transcribeSamples()...\n`;
+    log += `[VoiceModule] transcribeSamples 类型: ${typeof this.sttEngine.transcribeSamples}\n`;
 
     const result = await this.sttEngine.transcribeSamples(
       this.micChunks,
       this.micSampleRate
     );
 
+    log += `[VoiceModule] transcribeSamples 返回\n`;
+    log += `[VoiceModule] 识别结果: "${result.text}"\n`;
+    log += `[VoiceModule] 结果对象: ${JSON.stringify(result, null, 2)}\n`;
+
     this.micChunks = [];
-    return result.text;
+
+    return { text: result.text, debugLog: log };
   }
 
   async synthesizeAndPlay(text: string): Promise<void> {
