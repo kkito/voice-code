@@ -70,27 +70,11 @@ export default function App() {
     setIsInitializing(false);
   }, [addLog]);
 
-  // 开始录音
+  // 开始录音（使用 sherpa-onnx 原生 PCM 流）
   const startRecording = useCallback(async () => {
     try {
-      addLog('请求录音权限...');
-      const permission = await Audio.requestPermissionsAsync();
-      if (!permission.granted) {
-        Alert.alert('权限被拒绝', '需要录音权限才能使用语音识别');
-        return;
-      }
-
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
-      });
-
-      addLog('开始录音...');
-      const { recording: newRecording } = await Audio.Recording.createAsync(
-        Audio.RecordingOptionsPresets.HIGH_QUALITY
-      );
-
-      setRecording(newRecording);
+      addLog('开始录音（PCM 流）...');
+      await VoiceModule.startMicrophone();
       setIsRecording(true);
     } catch (error: any) {
       addLog(`录音失败: ${error.message}`);
@@ -100,25 +84,13 @@ export default function App() {
 
   // 停止录音并识别
   const stopRecording = useCallback(async () => {
-    if (!recording) return;
-
     try {
-      addLog('停止录音...');
+      addLog('停止录音并识别...');
       setIsRecording(false);
-      await recording.stopAndUnloadAsync();
 
-      const uri = recording.getURI();
-      if (!uri) {
-        Alert.alert('错误', '录音文件路径为空');
-        return;
-      }
-
-      addLog(`录音文件: ${uri}`);
-      addLog('开始识别...');
-
-      const text = await VoiceModule.recognizeAudioFile(uri);
+      const text = await VoiceModule.stopMicrophoneAndRecognize();
       setRecognizedText(text);
-      addLog(`识别结果: ${text}`);
+      addLog(`识别结果: ${text || '(空)'}`);
     } catch (error: any) {
       addLog(`识别异常:`);
       addLog(error.message || String(error));
@@ -126,7 +98,7 @@ export default function App() {
     } finally {
       setRecording(null);
     }
-  }, [recording, addLog]);
+  }, [addLog]);
 
   // TTS 合成并播放
   const handleSynthesize = useCallback(async () => {
@@ -204,7 +176,15 @@ export default function App() {
         {recognizedText ? (
           <View style={styles.resultBox}>
             <Text style={styles.resultTitle}>识别结果:</Text>
-            <Text style={styles.resultText}>{recognizedText}</Text>
+            <Text
+              style={styles.resultText}
+              selectable
+              onLongPress={() => {
+                // Android 长按会自动弹出复制菜单
+              }}
+            >
+              {recognizedText}
+            </Text>
           </View>
         ) : null}
       </View>

@@ -4,10 +4,11 @@
 
 import { createSTT } from 'react-native-sherpa-onnx/stt';
 import { createTTS, saveAudioToFile } from 'react-native-sherpa-onnx/tts';
+import { createPcmLiveStream } from 'react-native-sherpa-onnx/audio';
 import type { SttEngine, TtsEngine } from 'react-native-sherpa-onnx';
 import { Audio } from 'expo-av';
 import { Platform, Alert } from 'react-native';
-import * as FileSystem from 'expo-file-system';
+import { DocumentDirectoryPath } from '@dr.pogodin/react-native-fs';
 
 // 模型路径（打包在 assets 中）
 const ASR_MODEL_PATH = 'models/sense-voice-zh';
@@ -43,6 +44,10 @@ interface VoiceModuleType {
   initASR(): Promise<boolean>;
   initTTS(): Promise<boolean>;
   recognizeAudioFile(filePath: string): Promise<string>;
+  /** 开始麦克风录音（使用 sherpa-onnx 原生 PCM 流） */
+  startMicrophone(): Promise<void>;
+  /** 停止录音并识别（返回识别文本） */
+  stopMicrophoneAndRecognize(): Promise<string>;
   synthesizeAndPlay(text: string): Promise<void>;
   stopPlaying(): Promise<void>;
   destroy(): Promise<void>;
@@ -53,6 +58,10 @@ class VoiceModuleImpl implements VoiceModuleType {
   private sttEngine: SttEngine | null = null;
   private ttsEngine: TtsEngine | null = null;
   private sound: Audio.Sound | null = null;
+  private cacheDir: string | null = null;
+  private pcmStream: ReturnType<typeof createPcmLiveStream> | null = null;
+  private micChunks: number[] = [];
+  private micSampleRate = 16000;
 
   isReady(): { asr: boolean; tts: boolean } {
     return {
@@ -134,21 +143,28 @@ class VoiceModuleImpl implements VoiceModuleType {
 
   async recognizeAudioFile(filePath: string): Promise<string> {
     let log = '[VoiceModule] 开始识别文件\n';
-    log += `[VoiceModule] 文件路径: ${filePath}\n`;
-    
+    log += `[VoiceModule] 输入文件路径: ${filePath}\n`;
+
     try {
       if (!this.sttEngine) {
         throw new Error('ASR 引擎未初始化');
       }
 
+      // expo-av 录音返回的是 file:// URI，需要转换为本地路径路径
+      let localPath = filePath;
+      if (localPath && localPath.startsWith('file://')) {
+        localPath = localPath.replace('file://', '');
+        log += `[VoiceModule] 转换为本地路径: ${localPath}\n`;
+      }
+
       log += `[VoiceModule] transcribeFile 类型: ${typeof this.sttEngine.transcribeFile}\n`;
-      
+
       if (typeof this.sttEngine.transcribeFile !== 'function') {
         throw new Error(`transcribeFile is not a function! typeof = ${typeof this.sttEngine.transcribeFile}`);
       }
-      
+
       log += '[VoiceModule] 调用 transcribeFile()...\n';
-      const result = await this.sttEngine.transcribeFile(filePath);
+      const result = await this.sttEngine.transcribeFile(localPath);
       log += `[VoiceModule] 识别结果: ${result.text}\n`;
       return result.text;
     } catch (error: any) {
@@ -156,6 +172,60 @@ class VoiceModuleImpl implements VoiceModuleType {
       Alert.alert('识别失败', error?.message || '未知错误');
       throw new Error(log);
     }
+  }
+
+  async startMicrophone(): Promise<void> {
+    if (!this.sttEngine) {
+      throw new Error('ASR 引擎未初始化');
+    }
+
+    this.micChunks = [];
+
+    this.pcmStream = createPcmLiveStream({
+      sampleRate: this.micSampleRate,
+    });
+
+    this.pcmStream.on('pcmLiveStreamData', (data: { base64: string }) => {
+      // base64 是 Int16 PCM 数据，需要转换为浮点数数组
+      const binaryString = atob(data.base64);
+      const samples: number[] = [];
+      for (let i = 0; i < binaryString.length; i += 2) {
+        const low = binaryString.charCodeAt(i);
+        const high = binaryString.charCodeAt(i + 1);
+        const int16 = (high << 8) | low;
+        // 将无符号 Int16 转换为有符号，然后归一化到 [-1.0, 1.0]
+        const signed = int16 > 32767 ? int16 - 65536 : int16;
+        samples.push(signed / 32768.0);
+      }
+      this.micChunks.push(...samples);
+    });
+
+    this.pcmStream.start();
+  }
+
+  async stopMicrophoneAndRecognize(): Promise<string> {
+    if (!this.pcmStream) {
+      throw new Error('麦克风未启动，请先调用 startMicrophone()');
+    }
+
+    this.pcmStream.stop();
+    this.pcmStream = null;
+
+    if (!this.sttEngine) {
+      throw new Error('ASR 引擎未初始化');
+    }
+
+    if (this.micChunks.length === 0) {
+      return '';
+    }
+
+    const result = await this.sttEngine.transcribeSamples(
+      this.micChunks,
+      this.micSampleRate
+    );
+
+    this.micChunks = [];
+    return result.text;
   }
 
   async synthesizeAndPlay(text: string): Promise<void> {
@@ -182,14 +252,29 @@ class VoiceModuleImpl implements VoiceModuleType {
       log += `[VoiceModule] samples 长度: ${audio?.samples?.length}\n`;
 
       // 保存到文件
-      const outputPath = `${FileSystem.cacheDirectory}/tts_${Date.now()}.wav`;
+      // 使用 @dr.pogodin/react-native-fs 的 DocumentDirectoryPath（与 sherpa-onnx 库一致）
+      // 这个路径在 Android 上是类似 /data/data/com.anonymous.voicecode/files/
+      if (!this.cacheDir) {
+        const rawDir = DocumentDirectoryPath;
+
+        if (rawDir) {
+          this.cacheDir = rawDir;
+          log += `[VoiceModule] 缓存目录: ${this.cacheDir}\n`;
+        } else {
+          // 备选：使用安卓默认缓存路径
+          this.cacheDir = '/data/data/com.anonymous.voicecode/cache';
+          log += '[VoiceModule] 使用默认缓存路径\n';
+        }
+      }
+
+      const outputPath = `${this.cacheDir}/tts_${Date.now()}.wav`;
       log += `[VoiceModule] 保存路径: ${outputPath}\n`;
       log += `[VoiceModule] saveAudioToFile 类型: ${typeof saveAudioToFile}\n`;
-      
+
       if (typeof saveAudioToFile !== 'function') {
         throw new Error(`saveAudioToFile is not a function! typeof = ${typeof saveAudioToFile}`);
       }
-      
+
       log += '[VoiceModule] 调用 saveAudioToFile()...\n';
       await saveAudioToFile(audio, outputPath);
       log += '[VoiceModule] saveAudioToFile() 返回成功\n';
@@ -197,10 +282,12 @@ class VoiceModuleImpl implements VoiceModuleType {
       // 停止之前的播放
       await this.stopPlaying();
 
-      // 播放
+      // 播放 - expo-av 需要 file:// 前缀的 URI
       log += '[VoiceModule] 调用 Audio.Sound.createAsync()...\n';
+      const soundUri = Platform.OS === 'android' ? `file://${outputPath}` : outputPath;
+      log += `[VoiceModule] 播放 URI: ${soundUri}\n`;
       const { sound: newSound } = await Audio.Sound.createAsync(
-        { uri: Platform.OS === 'android' ? `file://${outputPath}` : outputPath },
+        { uri: soundUri },
         { shouldPlay: true }
       );
 
