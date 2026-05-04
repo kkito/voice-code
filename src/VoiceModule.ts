@@ -57,41 +57,44 @@ class VoiceModuleImpl implements VoiceModuleType {
   async initASR(): Promise<boolean> {
     try {
       if (this.sttEngine) {
-        return true; // 已经初始化
+        return true;
       }
 
-      console.log('[VoiceModule] 初始化 ASR 引擎...');
+      console.log('[VoiceModule] 初始化 ASR 引擎, 路径:', ASR_MODEL_PATH);
       
       this.sttEngine = await createSTT({
         modelPath: { type: 'asset', path: ASR_MODEL_PATH },
-        modelType: 'sense_voice',
-        preferInt8: true, // 使用 INT8 量化模型
+        modelType: 'auto',
+        preferInt8: true,
       });
       console.log('[VoiceModule] ASR 初始化成功');
       return true;
-    } catch (error) {
-      console.error('[VoiceModule] ASR 初始化失败:', error);
-      return false;
+    } catch (error: any) {
+      const msg = error?.message || String(error);
+      console.error('[VoiceModule] ASR 初始化失败:', msg);
+      // 抛出具体错误信息
+      throw new Error(msg);
     }
   }
 
   async initTTS(): Promise<boolean> {
     try {
       if (this.ttsEngine) {
-        return true; // 已经初始化
+        return true;
       }
 
-      console.log('[VoiceModule] 初始化 TTS 引擎...');
+      console.log('[VoiceModule] 初始化 TTS 引擎, 路径:', TTS_MODEL_PATH);
       
       this.ttsEngine = await createTTS({
         modelPath: { type: 'asset', path: TTS_MODEL_PATH },
-        modelType: 'vits',
+        modelType: 'auto',
       });
       console.log('[VoiceModule] TTS 初始化成功');
       return true;
-    } catch (error) {
-      console.error('[VoiceModule] TTS 初始化失败:', error);
-      return false;
+    } catch (error: any) {
+      const msg = error?.message || String(error);
+      console.error('[VoiceModule] TTS 初始化失败:', msg);
+      throw new Error(msg);
     }
   }
 

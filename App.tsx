@@ -33,27 +33,33 @@ export default function App() {
     setIsInitializing(true);
     addLog('开始初始化...');
 
+    let asrOk = false;
+    let ttsOk = false;
+
     try {
-      const [asrOk, ttsOk] = await Promise.all([
-        VoiceModule.initASR(),
-        VoiceModule.initTTS(),
-      ]);
-
-      setIsReady(VoiceModule.isReady());
-      addLog(`ASR 初始化${asrOk ? '成功' : '失败'}`);
-      addLog(`TTS 初始化${ttsOk ? '成功' : '失败'}`);
-
-      if (asrOk && ttsOk) {
-        Alert.alert('初始化成功', 'ASR 和 TTS 引擎已就绪');
-      } else {
-        Alert.alert('初始化部分失败', '请检查模型文件是否正确');
-      }
-    } catch (error: any) {
-      addLog(`初始化失败: ${error.message}`);
-      Alert.alert('初始化失败', error.message);
-    } finally {
-      setIsInitializing(false);
+      asrOk = await VoiceModule.initASR();
+      addLog(`ASR: ${asrOk ? '成功' : '失败'}`);
+    } catch (err: any) {
+      addLog(`ASR 错误: ${err.message}`);
     }
+
+    try {
+      ttsOk = await VoiceModule.initTTS();
+      addLog(`TTS: ${ttsOk ? '成功' : '失败'}`);
+    } catch (err: any) {
+      addLog(`TTS 错误: ${err.message}`);
+    }
+
+    setIsReady(VoiceModule.isReady());
+
+    if (asrOk && ttsOk) {
+      Alert.alert('初始化成功', 'ASR 和 TTS 引擎已就绪');
+    } else if (asrOk) {
+      Alert.alert('部分成功', 'ASR 就绪，TTS 未初始化');
+    } else {
+      Alert.alert('初始化失败', '请检查日志了解详细原因');
+    }
+    setIsInitializing(false);
   }, [addLog]);
 
   // 开始录音

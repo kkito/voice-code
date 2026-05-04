@@ -50,7 +50,19 @@
 - Android SDK（NDK 27.1.12297006）
 - 网络代理（用于下载 Gradle 依赖和 Sherpa-ONNX 原生库）
 
-### 安装依赖
+### 一键构建
+
+```bash
+# 首次构建（生成 android/ 目录 + 构建 APK）
+./build.sh --clean
+
+# 后续构建（仅编译，不重新生成 android/）
+./build.sh
+```
+
+### 手动分步构建（可选）
+
+#### 安装依赖
 
 ```bash
 pnpm install
