@@ -11,7 +11,6 @@ import {
   Platform,
 } from 'react-native';
 import { Audio } from 'expo-av';
-import * as FileSystem from 'expo-file-system';
 import { VoiceModule } from './src/VoiceModule';
 
 export default function App() {
@@ -25,7 +24,9 @@ export default function App() {
   const [log, setLog] = useState<string[]>([]);
 
   const addLog = useCallback((message: string) => {
-    setLog((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${message}`]);
+    // 支持多行日志一次性添加
+    const lines = message.split('\n').filter(l => l.trim());
+    setLog((prev) => [...prev, ...lines.map(line => `[${new Date().toLocaleTimeString()}] ${line}`)]);
   }, []);
 
   // 初始化 ASR 和 TTS
@@ -37,27 +38,34 @@ export default function App() {
     let ttsOk = false;
 
     try {
+      addLog('正在初始化 ASR...');
       asrOk = await VoiceModule.initASR();
       addLog(`ASR: ${asrOk ? '成功' : '失败'}`);
     } catch (err: any) {
-      addLog(`ASR 错误: ${err.message}`);
+      // 错误信息已经在 VoiceModule 中详细记录了
+      addLog(`ASR 异常:`);
+      addLog(err.message || String(err));
     }
 
     try {
+      addLog('正在初始化 TTS...');
       ttsOk = await VoiceModule.initTTS();
       addLog(`TTS: ${ttsOk ? '成功' : '失败'}`);
     } catch (err: any) {
-      addLog(`TTS 错误: ${err.message}`);
+      addLog(`TTS 异常:`);
+      addLog(err.message || String(err));
     }
 
-    setIsReady(VoiceModule.isReady());
+    const ready = VoiceModule.isReady();
+    setIsReady(ready);
+    addLog(`最终状态 - ASR: ${ready.asr ? '就绪' : '未就绪'}, TTS: ${ready.tts ? '就绪' : '未就绪'}`);
 
     if (asrOk && ttsOk) {
       Alert.alert('初始化成功', 'ASR 和 TTS 引擎已就绪');
     } else if (asrOk) {
       Alert.alert('部分成功', 'ASR 就绪，TTS 未初始化');
     } else {
-      Alert.alert('初始化失败', '请检查日志了解详细原因');
+      Alert.alert('初始化失败', '请查看下方日志了解详细原因');
     }
     setIsInitializing(false);
   }, [addLog]);
@@ -81,7 +89,7 @@ export default function App() {
       const { recording: newRecording } = await Audio.Recording.createAsync(
         Audio.RecordingOptionsPresets.HIGH_QUALITY
       );
-      
+
       setRecording(newRecording);
       setIsRecording(true);
     } catch (error: any) {
@@ -98,7 +106,7 @@ export default function App() {
       addLog('停止录音...');
       setIsRecording(false);
       await recording.stopAndUnloadAsync();
-      
+
       const uri = recording.getURI();
       if (!uri) {
         Alert.alert('错误', '录音文件路径为空');
@@ -112,7 +120,8 @@ export default function App() {
       setRecognizedText(text);
       addLog(`识别结果: ${text}`);
     } catch (error: any) {
-      addLog(`识别失败: ${error.message}`);
+      addLog(`识别异常:`);
+      addLog(error.message || String(error));
       Alert.alert('识别失败', error.message);
     } finally {
       setRecording(null);
@@ -133,7 +142,8 @@ export default function App() {
       await VoiceModule.synthesizeAndPlay(ttsText);
       addLog('播放完成');
     } catch (error: any) {
-      addLog(`合成失败: ${error.message}`);
+      addLog(`合成异常:`);
+      addLog(error.message || String(error));
       Alert.alert('合成失败', error.message);
     } finally {
       setIsSynthesizing(false);
@@ -234,7 +244,7 @@ export default function App() {
 
       {/* 日志 */}
       <View style={styles.logSection}>
-        <Text style={styles.sectionTitle}>日志</Text>
+        <Text style={styles.sectionTitle}>日志（包含完整错误信息）</Text>
         <ScrollView style={styles.logBox}>
           {log.map((line, index) => (
             <Text key={index} style={styles.logText}>
@@ -352,9 +362,9 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   logText: {
-    fontSize: 12,
+    fontSize: 11,
     color: '#666',
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-    marginBottom: 2,
+    marginBottom: 1,
   },
 });
